@@ -1,5 +1,7 @@
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace WinPowerMenu;
 
@@ -27,7 +29,6 @@ public static class PowercfgHelper
     {
         var v = ((int)action).ToString();
         var sb = new StringBuilder();
-        // Both AC and DC (battery), then activate the scheme so it takes effect.
         var steps = new[]
         {
             $"/SETACVALUEINDEX SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION {v}",
@@ -47,6 +48,54 @@ public static class PowercfgHelper
             }
         }
         return (true, sb.ToString());
+    }
+
+    /// <summary>
+    /// Enumerate every power scheme registered with Windows and force
+    /// PBUTTONACTION to <paramref name="action"/> on both AC and DC.
+    /// Defensive against OEM software (e.g. ASUS Armoury Crate) that
+    /// switches schemes at runtime — otherwise one scheme having
+    /// PBUTTONACTION=3 (shutdown) means an accidental shutdown the
+    /// next time the profile flips. Overlay / dynamic schemes that
+    /// reject writes are skipped silently.
+    /// </summary>
+    public static (bool ok, int touched, string log) EnforcePowerButtonActionAllSchemes(PowerButtonAction action)
+    {
+        var sb = new StringBuilder();
+        var (rc, list, err) = Run("powercfg.exe", "/L");
+        if (rc != 0)
+        {
+            sb.AppendLine("powercfg /L failed: " + err);
+            return (false, 0, sb.ToString());
+        }
+
+        var ids = new List<string>();
+        foreach (Match m in Regex.Matches(list, @"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"))
+        {
+            ids.Add(m.Value);
+        }
+        if (ids.Count == 0)
+        {
+            sb.AppendLine("no schemes parsed");
+            return (false, 0, sb.ToString());
+        }
+
+        var v = ((int)action).ToString();
+        int touched = 0;
+        foreach (var id in ids)
+        {
+            var (r1, _, e1) = Run("powercfg.exe", $"/SETACVALUEINDEX {id} SUB_BUTTONS PBUTTONACTION {v}");
+            var (r2, _, e2) = Run("powercfg.exe", $"/SETDCVALUEINDEX {id} SUB_BUTTONS PBUTTONACTION {v}");
+            if (r1 == 0 && r2 == 0) touched++;
+            else
+            {
+                sb.Append("scheme ").Append(id).AppendLine(" partially skipped (likely overlay)");
+                if (!string.IsNullOrWhiteSpace(e1)) sb.AppendLine("  " + e1.TrimEnd());
+                if (!string.IsNullOrWhiteSpace(e2)) sb.AppendLine("  " + e2.TrimEnd());
+            }
+        }
+        Run("powercfg.exe", "/S SCHEME_CURRENT");
+        return (true, touched, sb.ToString());
     }
 
     private static (int rc, string stdout, string stderr) Run(string file, string args)

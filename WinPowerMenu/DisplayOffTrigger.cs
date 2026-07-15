@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Threading;
 
 namespace WinPowerMenu;
 
@@ -75,6 +76,7 @@ public sealed class DisplayOffTrigger : IDisposable
     private IntPtr _hNotify1 = IntPtr.Zero;
     private IntPtr _hNotify2 = IntPtr.Zero;
     private DateTime _lastFire = DateTime.MinValue;
+    private DispatcherTimer? _protectionTimer;
 
     public DisplayOffTrigger(Action onTrigger, TimeSpan? recentInput = null)
     {
@@ -106,6 +108,28 @@ public sealed class DisplayOffTrigger : IDisposable
         _hNotify1 = RegisterPowerSettingNotification(wih.Handle, ref g1, DEVICE_NOTIFY_WINDOW_HANDLE);
         var g2 = GUID_MONITOR_POWER_ON;
         _hNotify2 = RegisterPowerSettingNotification(wih.Handle, ref g2, DEVICE_NOTIFY_WINDOW_HANDLE);
+
+        // Defence against OEM power-plan switching (ROG Armoury Crate, etc.)
+        // silently swapping to a scheme with PBUTTONACTION=3 (shutdown).
+        EnforceProtection("Start");
+        _protectionTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+        _protectionTimer.Tick += (_, _) => EnforceProtection("timer");
+        _protectionTimer.Start();
+    }
+
+    private static void EnforceProtection(string reason)
+    {
+        try
+        {
+            var (ok, touched, log) = PowercfgHelper.EnforcePowerButtonActionAllSchemes(
+                PowerButtonAction.TurnOffDisplay);
+            CrashLog.Info($"protect ({reason}): ok={ok} schemes_touched={touched}"
+                + (string.IsNullOrWhiteSpace(log) ? "" : "\n" + log));
+        }
+        catch (Exception ex)
+        {
+            CrashLog.Write("EnforceProtection", ex);
+        }
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -199,6 +223,8 @@ public sealed class DisplayOffTrigger : IDisposable
 
     public void Dispose()
     {
+        _protectionTimer?.Stop();
+        _protectionTimer = null;
         if (_hNotify1 != IntPtr.Zero) { UnregisterPowerSettingNotification(_hNotify1); _hNotify1 = IntPtr.Zero; }
         if (_hNotify2 != IntPtr.Zero) { UnregisterPowerSettingNotification(_hNotify2); _hNotify2 = IntPtr.Zero; }
         if (_source != null) { _source.RemoveHook(WndProc); _source = null; }
