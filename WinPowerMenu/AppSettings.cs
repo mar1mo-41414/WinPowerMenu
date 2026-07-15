@@ -11,6 +11,8 @@ public enum TriggerSource
     HidSystemControl = 1,// Raw Input on HID Generic Desktop / System Control (0x01/0x80)
     HidConsumer = 2,     // Raw Input on HID Consumer (0x0C/0x01)
     HidKeyboard = 3,     // Raw Input keyboard-type, VK match (bypasses low-level hook)
+    DisplayOff = 4,      // Windows power-button set to "Turn off display"; we intercept
+                         // GUID_CONSOLE_DISPLAY_STATE → user-initiated press heuristic
 }
 
 public sealed class AppSettings

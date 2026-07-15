@@ -9,6 +9,7 @@ public partial class App : System.Windows.Application
     private static Mutex? _singleInstance;
     private LowLevelKeyboardHook? _hook;
     private HiddenRawInputWindow? _rawHost;
+    private DisplayOffTrigger? _displayOff;
     private TrayIcon? _tray;
     private PowerMenuWindow? _menu;
     private AppSettings _settings = new();
@@ -33,6 +34,7 @@ public partial class App : System.Windows.Application
         _tray?.Dispose();
         _hook?.Dispose();
         _rawHost?.Dispose();
+        _displayOff?.Dispose();
         try { _singleInstance?.ReleaseMutex(); } catch { }
         _singleInstance?.Dispose();
     }
@@ -67,26 +69,32 @@ public partial class App : System.Windows.Application
     /// <summary>Rebuild the runtime input capture path from current settings.</summary>
     public void ApplyTrigger()
     {
-        _hook?.Dispose();
-        _hook = null;
-        _rawHost?.Dispose();
-        _rawHost = null;
+        _hook?.Dispose();       _hook = null;
+        _rawHost?.Dispose();    _rawHost = null;
+        _displayOff?.Dispose(); _displayOff = null;
 
         try
         {
-            if (_settings.TriggerSource == TriggerSource.Keyboard)
+            switch (_settings.TriggerSource)
             {
-                _hook = new LowLevelKeyboardHook
-                {
-                    TargetVkCode = _settings.TriggerVkCode,
-                    OnPowerKey = ShowMenu,
-                };
-                _hook.Start();
-            }
-            else
-            {
-                _rawHost = new HiddenRawInputWindow(_settings, ShowMenu);
-                _rawHost.Start();
+                case TriggerSource.Keyboard:
+                    _hook = new LowLevelKeyboardHook
+                    {
+                        TargetVkCode = _settings.TriggerVkCode,
+                        OnPowerKey = ShowMenu,
+                    };
+                    _hook.Start();
+                    break;
+
+                case TriggerSource.DisplayOff:
+                    _displayOff = new DisplayOffTrigger(ShowMenu);
+                    _displayOff.Start();
+                    break;
+
+                default: // HidSystemControl / HidConsumer / HidKeyboard
+                    _rawHost = new HiddenRawInputWindow(_settings, ShowMenu);
+                    _rawHost.Start();
+                    break;
             }
         }
         catch (Exception ex)

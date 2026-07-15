@@ -10,12 +10,10 @@ public partial class SettingsWindow : Window
 {
     private readonly AppSettings _settings;
 
-    // Learn-scoped resources
     private LowLevelKeyboardHook? _learnHook;
     private RawInputHost? _learnRaw;
     private DispatcherTimer? _learnTimer;
 
-    // Pending candidates (staged, only saved on OK)
     private TriggerSource _pendingSource;
     private uint _pendingVk;
     private uint _pendingScan;
@@ -23,22 +21,28 @@ public partial class SettingsWindow : Window
     private uint _pendingHidUsage;
     private string _pendingLabel;
 
-    private bool _suppressAutoStartHandler;
+    private bool _suppressHandlers;
 
     public SettingsWindow(AppSettings settings)
     {
         InitializeComponent();
         _settings = settings;
 
-        _pendingSource = settings.TriggerSource;
-        _pendingVk = settings.TriggerVkCode;
-        _pendingScan = settings.TriggerScanCode;
-        _pendingHidPage = settings.TriggerHidUsagePage;
+        _pendingSource   = settings.TriggerSource;
+        _pendingVk       = settings.TriggerVkCode;
+        _pendingScan     = settings.TriggerScanCode;
+        _pendingHidPage  = settings.TriggerHidUsagePage;
         _pendingHidUsage = settings.TriggerHidUsage;
-        _pendingLabel = settings.TriggerLabel;
+        _pendingLabel    = settings.TriggerLabel;
+
+        _suppressHandlers = true;
+        ModeKeyRadio.IsChecked     = _pendingSource != TriggerSource.DisplayOff;
+        ModeDisplayRadio.IsChecked = _pendingSource == TriggerSource.DisplayOff;
+        _suppressHandlers = false;
 
         RefreshKeyLabel();
         RefreshAutoStart();
+        RefreshPanels();
     }
 
     private void RefreshKeyLabel()
@@ -49,6 +53,7 @@ public partial class SettingsWindow : Window
             TriggerSource.HidKeyboard      => "Raw Input (HID Keyboard)",
             TriggerSource.HidSystemControl => "Raw Input (HID System Control)",
             TriggerSource.HidConsumer      => "Raw Input (HID Consumer)",
+            TriggerSource.DisplayOff       => "Display-off hack",
             _ => _pendingSource.ToString(),
         };
         CurrentKeyLabel.Text =
@@ -61,16 +66,46 @@ public partial class SettingsWindow : Window
     {
         try
         {
-            _suppressAutoStartHandler = true;
+            _suppressHandlers = true;
             AutoStartCheck.IsChecked = AutoStartManager.IsEnabled();
         }
         catch { }
-        finally { _suppressAutoStartHandler = false; }
+        finally { _suppressHandlers = false; }
+    }
+
+    private void RefreshPanels()
+    {
+        bool isDisplay = _pendingSource == TriggerSource.DisplayOff;
+        DisplayPanel.IsEnabled = isDisplay;
+        DisplayPanel.Opacity   = isDisplay ? 1.0 : 0.4;
+        LearnPanel.IsEnabled   = !isDisplay;
+        LearnPanel.Opacity     = !isDisplay ? 1.0 : 0.4;
+    }
+
+    private void Mode_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_suppressHandlers) return;
+        if (ModeDisplayRadio.IsChecked == true)
+        {
+            _pendingSource = TriggerSource.DisplayOff;
+        }
+        else
+        {
+            // Reverting from DisplayOff falls back to whatever was learned last.
+            if (_pendingSource == TriggerSource.DisplayOff)
+            {
+                _pendingSource = _settings.TriggerSource == TriggerSource.DisplayOff
+                    ? TriggerSource.Keyboard
+                    : _settings.TriggerSource;
+            }
+        }
+        RefreshKeyLabel();
+        RefreshPanels();
     }
 
     private void AutoStart_Toggled(object sender, RoutedEventArgs e)
     {
-        if (_suppressAutoStartHandler) return;
+        if (_suppressHandlers) return;
         try
         {
             AutoStartManager.SetEnabled(AutoStartCheck.IsChecked == true);
@@ -81,6 +116,22 @@ public partial class SettingsWindow : Window
                 "WinPowerMenu", MessageBoxButton.OK, MessageBoxImage.Warning);
             RefreshAutoStart();
         }
+    }
+
+    private void SetPowerButtonToDisplayOff_Click(object sender, RoutedEventArgs e)
+    {
+        var (ok, log) = PowercfgHelper.SetPowerButtonAction(PowerButtonAction.TurnOffDisplay);
+        PowercfgStatus.Text = ok
+            ? "電源ボタン設定を『ディスプレイの電源を切る』に変更しました。"
+            : "変更に失敗しました。管理者権限で起動する必要があるかもしれません。\n" + log;
+    }
+
+    private void SetPowerButtonToNothing_Click(object sender, RoutedEventArgs e)
+    {
+        var (ok, log) = PowercfgHelper.SetPowerButtonAction(PowerButtonAction.Nothing);
+        PowercfgStatus.Text = ok
+            ? "電源ボタン設定を『何もしない』に戻しました。"
+            : "変更に失敗しました。\n" + log;
     }
 
     private void OpenLog_Click(object sender, RoutedEventArgs e)
@@ -109,31 +160,24 @@ public partial class SettingsWindow : Window
 
         LearnLogger.StartSession($"machine={Environment.MachineName}, user={Environment.UserName}");
 
-        // 1) Low-level keyboard hook (VK path).
         _learnHook = new LowLevelKeyboardHook
         {
             LearnMode = true,
             OnKeyLearned = (vk, scan) =>
             {
                 LearnLogger.Log($"LL keyboard hook: VK=0x{vk:X2} Scan=0x{scan:X2}");
-                AcceptCandidate(TriggerSource.Keyboard,
-                    vk: vk, scan: scan,
+                AcceptCandidate(TriggerSource.Keyboard, vk: vk, scan: scan,
                     label: $"Learned VK 0x{vk:X2} (low-level hook)");
             },
         };
         try { _learnHook.Start(); }
-        catch (Exception ex)
-        {
-            LearnLogger.Log("LL hook start failed: " + ex.Message);
-        }
+        catch (Exception ex) { LearnLogger.Log("LL hook start failed: " + ex.Message); }
 
-        // 2) Raw Input (HID + HID keyboard) + WM_POWERBROADCAST.
         _learnRaw = new RawInputHost
         {
             OnHid = (page, usage, data) =>
             {
-                LearnLogger.Log(
-                    $"RawInput HID page=0x{page:X2} usage=0x{usage:X2} bytes=[{LearnLogger.HexDump(data)}]");
+                LearnLogger.Log($"RawInput HID page=0x{page:X2} usage=0x{usage:X2} bytes=[{LearnLogger.HexDump(data)}]");
                 if (AnyNonZero(data))
                 {
                     var pageName = HidUsageName(page, usage);
@@ -145,17 +189,12 @@ public partial class SettingsWindow : Window
             },
             OnKeyboard = (vk, scan, flags) =>
             {
-                LearnLogger.Log(
-                    $"RawInput Keyboard VK=0x{vk:X2} Scan=0x{scan:X2} Flags=0x{flags:X4}");
-                if ((flags & 0x01) != 0) return; // key-break; ignore
-                AcceptCandidate(TriggerSource.HidKeyboard,
-                    vk: vk, scan: scan,
+                LearnLogger.Log($"RawInput Keyboard VK=0x{vk:X2} Scan=0x{scan:X2} Flags=0x{flags:X4}");
+                if ((flags & 0x01) != 0) return;
+                AcceptCandidate(TriggerSource.HidKeyboard, vk: vk, scan: scan,
                     label: $"Learned VK 0x{vk:X2} (Raw Input keyboard)");
             },
-            OnPowerBroadcast = (w) =>
-            {
-                LearnLogger.Log($"WM_POWERBROADCAST wParam=0x{w:X4}");
-            },
+            OnPowerBroadcast = (w) => LearnLogger.Log($"WM_POWERBROADCAST wParam=0x{w:X4}"),
         };
         _learnRaw.Attach(this);
 
@@ -167,7 +206,7 @@ public partial class SettingsWindow : Window
             {
                 StatusText.Text =
                     "タイムアウトしました。何も検出できません。\n" +
-                    "→「learn.log を開く」ボタンでログを送ってください。";
+                    "→ 電源ボタンが取れない機種の場合、上の『画面 OFF フック』方式を試してください。";
             }
         };
         _learnTimer.Start();
@@ -178,7 +217,6 @@ public partial class SettingsWindow : Window
         uint hidPage = 0, uint hidUsage = 0,
         string label = "")
     {
-        // First-match wins (learn mode should end on the first real event).
         if (_learnHook is null && _learnRaw is null) return;
 
         _pendingSource = source;
@@ -188,8 +226,15 @@ public partial class SettingsWindow : Window
         _pendingHidUsage = hidUsage;
         _pendingLabel = label;
 
+        // Learn only ever lands us in a non-DisplayOff source
+        _suppressHandlers = true;
+        ModeKeyRadio.IsChecked = true;
+        ModeDisplayRadio.IsChecked = false;
+        _suppressHandlers = false;
+
         FinishLearn();
         RefreshKeyLabel();
+        RefreshPanels();
         StatusText.Text = "登録候補にセットしました。OK で保存します。";
     }
 
@@ -214,12 +259,12 @@ public partial class SettingsWindow : Window
 
     private void Ok_Click(object sender, RoutedEventArgs e)
     {
-        _settings.TriggerSource = _pendingSource;
-        _settings.TriggerVkCode = _pendingVk;
-        _settings.TriggerScanCode = _pendingScan;
+        _settings.TriggerSource      = _pendingSource;
+        _settings.TriggerVkCode      = _pendingVk;
+        _settings.TriggerScanCode    = _pendingScan;
         _settings.TriggerHidUsagePage = _pendingHidPage;
-        _settings.TriggerHidUsage = _pendingHidUsage;
-        _settings.TriggerLabel = _pendingLabel;
+        _settings.TriggerHidUsage    = _pendingHidUsage;
+        _settings.TriggerLabel       = _pendingLabel;
         try
         {
             _settings.Save();
@@ -254,19 +299,16 @@ public partial class SettingsWindow : Window
         return data.Length > 0 && data[0] != 0;
     }
 
-    private static string HidUsageName(ushort page, ushort usage)
+    private static string HidUsageName(ushort page, ushort usage) => (page, usage) switch
     {
-        return (page, usage) switch
-        {
-            (0x01, 0x80) => "System Control (collection)",
-            (0x01, 0x81) => "System Power Down",
-            (0x01, 0x82) => "System Sleep",
-            (0x01, 0x83) => "System Wake Up",
-            (0x01, 0x06) => "Keyboard (collection)",
-            (0x0C, 0x01) => "Consumer Control (collection)",
-            (0x0C, 0x30) => "Consumer Power",
-            (0x0C, 0x32) => "Consumer Sleep",
-            _ => "unknown"
-        };
-    }
+        (0x01, 0x80) => "System Control (collection)",
+        (0x01, 0x81) => "System Power Down",
+        (0x01, 0x82) => "System Sleep",
+        (0x01, 0x83) => "System Wake Up",
+        (0x01, 0x06) => "Keyboard (collection)",
+        (0x0C, 0x01) => "Consumer Control (collection)",
+        (0x0C, 0x30) => "Consumer Power",
+        (0x0C, 0x32) => "Consumer Sleep",
+        _ => "unknown"
+    };
 }
