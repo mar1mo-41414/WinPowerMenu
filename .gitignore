@@ -1,0 +1,30 @@
+# .NET / VS
+bin/
+obj/
+out/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+.vscode/
+*.pdb
+*.dll
+*.exe
+*.log
+
+# Rider / Resharper
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+# Publish output
+publish/
+*.pubxml.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local runtime state
+settings.local.json
