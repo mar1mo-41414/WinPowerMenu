@@ -1,6 +1,8 @@
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 
 namespace WinPowerMenu;
 
@@ -16,6 +18,8 @@ public partial class App : System.Windows.Application
 
     private void OnStartup(object sender, StartupEventArgs e)
     {
+        InstallCrashHandlers();
+
         _singleInstance = new Mutex(true, "WinPowerMenu.SingleInstance.v1", out bool created);
         if (!created)
         {
@@ -27,6 +31,27 @@ public partial class App : System.Windows.Application
         MaybeShowFirstLaunchPrompt();
         ApplyTrigger();
         _tray = new TrayIcon(this);
+
+        CrashLog.Info($"Startup OK, trigger={_settings.TriggerSource}");
+    }
+
+    private void InstallCrashHandlers()
+    {
+        DispatcherUnhandledException += (s, e) =>
+        {
+            CrashLog.Write("DispatcherUnhandledException", e.Exception);
+            e.Handled = true; // keep the app alive
+        };
+        AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+        {
+            CrashLog.Write("AppDomain.UnhandledException", e.ExceptionObject as Exception,
+                $"IsTerminating={e.IsTerminating}");
+        };
+        TaskScheduler.UnobservedTaskException += (s, e) =>
+        {
+            CrashLog.Write("TaskScheduler.UnobservedTaskException", e.Exception);
+            e.SetObserved();
+        };
     }
 
     private void OnExit(object sender, ExitEventArgs e)
@@ -107,15 +132,29 @@ public partial class App : System.Windows.Application
 
     public void ShowMenu()
     {
-        if (_menu is { IsVisible: true })
+        try
         {
-            _menu.Activate();
-            return;
+            var current = _menu;
+            if (current is { IsVisible: true })
+            {
+                current.Activate();
+                return;
+            }
+
+            var w = new PowerMenuWindow();
+            _menu = w;
+            w.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_menu, w)) _menu = null;
+                ExecutionState.Release();
+            };
+            w.Show();
+            w.Activate();
         }
-        _menu = new PowerMenuWindow();
-        _menu.Closed += (_, _) => _menu = null;
-        _menu.Show();
-        _menu.Activate();
+        catch (Exception ex)
+        {
+            CrashLog.Write("ShowMenu", ex);
+        }
     }
 
     public void ShowSettings()

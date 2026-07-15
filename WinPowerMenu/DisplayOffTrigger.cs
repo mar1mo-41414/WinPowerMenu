@@ -20,6 +20,9 @@ namespace WinPowerMenu;
 public sealed class DisplayOffTrigger : IDisposable
 {
     private const int WM_POWERBROADCAST = 0x0218;
+    private const int PBT_APMSUSPEND = 0x0004;
+    private const int PBT_APMRESUMESUSPEND = 0x0007;
+    private const int PBT_APMRESUMEAUTOMATIC = 0x0012;
     private const int PBT_POWERSETTINGCHANGE = 0x8013;
     private const uint DEVICE_NOTIFY_WINDOW_HANDLE = 0;
 
@@ -59,12 +62,6 @@ public sealed class DisplayOffTrigger : IDisposable
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
-    [DllImport("kernel32.dll")]
-    private static extern uint SetThreadExecutionState(uint esFlags);
-
-    private const uint ES_CONTINUOUS = 0x80000000;
-    private const uint ES_DISPLAY_REQUIRED = 0x00000002;
-    private const uint ES_SYSTEM_REQUIRED = 0x00000001;
     private static readonly IntPtr HWND_BROADCAST = new(0xffff);
     private const uint WM_SYSCOMMAND = 0x0112;
     private const int SC_MONITORPOWER = 0xF170;
@@ -113,48 +110,90 @@ public sealed class DisplayOffTrigger : IDisposable
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (msg == WM_POWERBROADCAST && wParam.ToInt32() == PBT_POWERSETTINGCHANGE)
+        try
         {
-            var setting = Marshal.PtrToStructure<POWERBROADCAST_SETTING>(lParam);
-            if (setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE ||
-                setting.PowerSetting == GUID_MONITOR_POWER_ON)
+            if (msg != WM_POWERBROADCAST) return IntPtr.Zero;
+
+            int reason = wParam.ToInt32();
+            switch (reason)
             {
-                int dataOffset = Marshal.SizeOf<POWERBROADCAST_SETTING>();
-                uint value = (uint)Marshal.ReadInt32(lParam, dataOffset);
-                if (value == 0)
-                {
-                    OnDisplayOff();
-                }
+                case PBT_APMSUSPEND:
+                    CrashLog.Info("WM_POWERBROADCAST: PBT_APMSUSPEND");
+                    break;
+                case PBT_APMRESUMESUSPEND:
+                    CrashLog.Info("WM_POWERBROADCAST: PBT_APMRESUMESUSPEND");
+                    break;
+                case PBT_APMRESUMEAUTOMATIC:
+                    CrashLog.Info("WM_POWERBROADCAST: PBT_APMRESUMEAUTOMATIC");
+                    break;
+                case PBT_POWERSETTINGCHANGE:
+                    var setting = Marshal.PtrToStructure<POWERBROADCAST_SETTING>(lParam);
+                    if (setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE ||
+                        setting.PowerSetting == GUID_MONITOR_POWER_ON)
+                    {
+                        int dataOffset = Marshal.SizeOf<POWERBROADCAST_SETTING>();
+                        uint value = (uint)Marshal.ReadInt32(lParam, dataOffset);
+                        CrashLog.Info($"PBT_POWERSETTINGCHANGE guid={setting.PowerSetting} value={value}");
+                        if (value == 0) OnDisplayOff();
+                    }
+                    break;
             }
+        }
+        catch (Exception ex)
+        {
+            CrashLog.Write("DisplayOff.WndProc", ex);
         }
         return IntPtr.Zero;
     }
 
     private void OnDisplayOff()
     {
-        if ((DateTime.UtcNow - _lastFire) < _debounce) return;
-
-        var lii = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
-        if (!GetLastInputInfo(ref lii)) return;
-
-        long deltaMs = unchecked((int)((uint)Environment.TickCount - lii.dwTime));
-        if (deltaMs < 0 || deltaMs > _recentInput.TotalMilliseconds)
+        try
         {
-            // stale input → this is likely an idle-timeout display-off, not a press
-            return;
+            if ((DateTime.UtcNow - _lastFire) < _debounce)
+            {
+                CrashLog.Info("DisplayOff: debounced");
+                return;
+            }
+
+            var lii = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
+            if (!GetLastInputInfo(ref lii))
+            {
+                CrashLog.Info("DisplayOff: GetLastInputInfo failed");
+                return;
+            }
+
+            long deltaMs = unchecked((int)((uint)Environment.TickCount - lii.dwTime));
+            if (deltaMs < 0 || deltaMs > _recentInput.TotalMilliseconds)
+            {
+                CrashLog.Info($"DisplayOff: idle timeout (last input {deltaMs}ms ago)");
+                return;
+            }
+
+            _lastFire = DateTime.UtcNow;
+            CrashLog.Info($"DisplayOff: firing (last input {deltaMs}ms ago)");
+            Application.Current?.Dispatcher.BeginInvoke(() =>
+            {
+                try
+                {
+                    WakeDisplay();
+                    _onTrigger();
+                }
+                catch (Exception ex)
+                {
+                    CrashLog.Write("DisplayOff.dispatched", ex);
+                }
+            });
         }
-
-        _lastFire = DateTime.UtcNow;
-        Application.Current?.Dispatcher.BeginInvoke(() =>
+        catch (Exception ex)
         {
-            WakeDisplay();
-            _onTrigger();
-        });
+            CrashLog.Write("DisplayOff.OnDisplayOff", ex);
+        }
     }
 
     private static void WakeDisplay()
     {
-        SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+        ExecutionState.KeepDisplayOn();
         PostMessage(HWND_BROADCAST, WM_SYSCOMMAND, (IntPtr)SC_MONITORPOWER, (IntPtr)(-1));
     }
 
@@ -165,6 +204,6 @@ public sealed class DisplayOffTrigger : IDisposable
         if (_source != null) { _source.RemoveHook(WndProc); _source = null; }
         _window?.Close();
         _window = null;
-        SetThreadExecutionState(ES_CONTINUOUS);
+        ExecutionState.Release();
     }
 }

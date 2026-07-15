@@ -1,11 +1,12 @@
 using System;
 using System.Windows;
-using System.Windows.Input;
 
 namespace WinPowerMenu;
 
 public partial class PowerMenuWindow : Window
 {
+    private bool _closing;
+
     public PowerMenuWindow()
     {
         InitializeComponent();
@@ -16,36 +17,44 @@ public partial class PowerMenuWindow : Window
     {
         if (e.Key == System.Windows.Input.Key.Escape)
         {
-            Close();
+            SafeClose();
         }
     }
 
     private void Window_Deactivated(object sender, EventArgs e)
     {
-        // Close if the user clicks away — feels natural for an overlay.
-        Close();
+        // Clicking away or focus loss dismisses the popup — but guard against
+        // the re-entrant case where Close() itself triggers WM_ACTIVATE(false).
+        SafeClose();
+    }
+
+    private void SafeClose()
+    {
+        if (_closing) return;
+        _closing = true;
+        try { Close(); } catch { /* already closing */ }
     }
 
     private void Shutdown_Click(object sender, RoutedEventArgs e)
     {
-        Close();
+        SafeClose();
         PowerActions.Shutdown();
     }
 
     private void Restart_Click(object sender, RoutedEventArgs e)
     {
-        Close();
+        SafeClose();
         PowerActions.Restart();
     }
 
     private void Sleep_Click(object sender, RoutedEventArgs e)
     {
-        Close();
+        SafeClose();
         PowerActions.Sleep();
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
-        Close();
+        SafeClose();
     }
 }
