@@ -16,6 +16,18 @@
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <!-- WFAC010: WinForms wants DPI in code, but we set it in the manifest for WPF. -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
   </PropertyGroup>
+
+  <!--
+    WinForms is only used for the NotifyIcon in TrayIcon.cs; keep its
+    namespaces OUT of the implicit-using set so Application / MessageBox /
+    KeyEventArgs unambiguously resolve to WPF everywhere else.
+  -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
 
 </Project>
